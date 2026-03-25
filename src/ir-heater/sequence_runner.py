@@ -166,12 +166,20 @@ def run_sequence(
         dps.onoff("w", 1)
 
     previous_t = 0.0
+    scheduled_elapsed = 0.0
+    start_monotonic = time.perf_counter()
+    last_voltage: float | None = None
+    last_current: float | None = None
     try:
         for index, step in enumerate(steps, start=1):
             if not dry_run:
                 assert dps is not None  # narrowed by the entry guard
-                dps.voltage_set("w", step.voltage_v)
-                dps.current_set("w", step.current_a)
+                if last_voltage != step.voltage_v:
+                    dps.voltage_set("w", step.voltage_v)
+                    last_voltage = step.voltage_v
+                if last_current != step.current_a:
+                    dps.current_set("w", step.current_a)
+                    last_current = step.current_a
 
             if printer is not None:
                 printer.send_move(step.x, step.y, step.z, step.feedrate)
@@ -185,15 +193,18 @@ def run_sequence(
             )
 
             if time_mode == "step":
-                wait_s = max(0.0, step.time_s)
+                delta_s = max(0.0, step.time_s)
             else:
                 # Allow loop wrap-around: if time goes backwards, treat it as a
                 # new loop iteration starting from 0.
                 if step.time_s < previous_t:
                     previous_t = 0.0
-                wait_s = step.time_s - previous_t
+                delta_s = step.time_s - previous_t
                 previous_t = step.time_s
 
+            scheduled_elapsed += delta_s
+            target_time = start_monotonic + scheduled_elapsed
+            wait_s = target_time - time.perf_counter()
             if wait_s > 0:
                 time.sleep(wait_s)
     finally:
