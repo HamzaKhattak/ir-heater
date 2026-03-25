@@ -171,16 +171,18 @@ def _transition_feedrate(start: Position, end: Position, transition_s: float, fa
 def rows_for_pair(spec: PositionPairSpec) -> list[SequenceRow]:
     travel_time_s = _travel_time_s(spec)
     rows: list[SequenceRow] = []
-    elapsed = 0.0
-    use_a = True
+    epsilon = 1e-9
+    if spec.duration_s + epsilon < travel_time_s:
+        raise ValueError(
+            "duration_s is shorter than one full A/B move at the configured feedrate; "
+            "increase duration_s or reduce feedrate"
+        )
 
-    # Alternate A/B moves until this pair's requested duration is consumed.
-    # Always emit the full travel_time_s per step so the runner sleeps for
-    # exactly as long as the printer needs — never firing the next command
-    # mid-move. The last move may push slightly past duration_s, but every
-    # move is always complete.
-    while elapsed < spec.duration_s:
-        pos = spec.a if use_a else spec.b
+    # Use integer move count + remainder to avoid float accumulation drift
+    # causing accidental extra moves beyond duration_s.
+    full_moves = int(math.floor((spec.duration_s + epsilon) / travel_time_s))
+    for move_idx in range(full_moves):
+        pos = spec.a if move_idx % 2 == 0 else spec.b
         rows.append(
             SequenceRow(
                 time_s=travel_time_s,
@@ -192,8 +194,23 @@ def rows_for_pair(spec: PositionPairSpec) -> list[SequenceRow]:
                 feedrate=spec.feedrate,
             )
         )
-        elapsed += travel_time_s
-        use_a = not use_a
+
+    elapsed = full_moves * travel_time_s
+    remainder_s = spec.duration_s - elapsed
+    if remainder_s > epsilon and rows:
+        # Fill remaining section time without another partial move.
+        last = rows[-1]
+        rows.append(
+            SequenceRow(
+                time_s=remainder_s,
+                current_a=spec.current_a,
+                voltage_v=spec.voltage_v,
+                x=last.x,
+                y=last.y,
+                z=last.z,
+                feedrate=spec.feedrate,
+            )
+        )
 
     return rows
 
