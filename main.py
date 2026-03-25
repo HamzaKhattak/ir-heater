@@ -11,6 +11,8 @@ def _load_module(module_name: str, module_path: Path):
         raise RuntimeError(f"Unable to load module from {module_path}")
 
     module = importlib.util.module_from_spec(spec)
+    # Ensure decorators and runtime introspection can resolve the module during import.
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
