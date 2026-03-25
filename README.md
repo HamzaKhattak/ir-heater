@@ -93,22 +93,27 @@ Input pairs CSV required columns:
 - `current_a`
 - `voltage_v`
 
-Optional pair columns:
+Optional pair column:
 
-- `feedrate` (or `speed`, `f`)
-- `step_s` (or `time_step`, `dt`)
+- `feedrate` (or `speed`, `f`) — defaults to `--default-feedrate` if omitted
 
 Behavior:
 
-- For each pair row, generator alternates moves between `A(ax,ay,az)` and `B(bx,by,bz)`.
-- It keeps alternating for that pair's `duration_s`, then proceeds to the next pair row.
-- Each pair can have different `duration_s`, `current_a`, and `voltage_v`.
+- For each pair row, the generator computes the exact travel time between A and B from geometry and feedrate:
+
+  $t_{travel} = \dfrac{\sqrt{\Delta x^2 + \Delta y^2 + \Delta z^2} \times 60}{feedrate}$
+
+  where feedrate is in mm/min (standard G-code).
+- Each CSV `time` value is set to exactly $t_{travel}$, so the runner sleeps for precisely as long as the printer needs to complete each move — no idle waiting, no queued-up commands mid-move.
+- The generator alternates A → B → A → B until the pair's `duration_s` is consumed, then moves to the next pair row.
+- Each pair can have different `duration_s`, `current_a`, `voltage_v`, and `feedrate`.
+- A and B must not be the same position (zero distance produces an error).
 - Output CSV columns are: `time,current,voltage,x,y,z,feedrate`.
 
 Example input (`pair_specs.csv`):
 
 ```csv
-ax,ay,az,bx,by,bz,duration_s,current_a,voltage_v,feedrate,step_s
-10,10,1,20,10,1,15,1.20,12.0,1200,0.5
-20,20,1,30,20,1,8,0.90,10.5,1000,0.25
+ax,ay,az,bx,by,bz,duration_s,current_a,voltage_v,feedrate
+10,10,1,20,10,1,15,1.20,12.0,1200
+20,20,1,30,20,1,8,0.90,10.5,1000
 ```

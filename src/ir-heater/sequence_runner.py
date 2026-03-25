@@ -162,12 +162,14 @@ def run_sequence(
         raise ValueError("dps instance is required when dry_run is False")
 
     if not dry_run:
+        assert dps is not None  # narrowed by the guard above
         dps.onoff("w", 1)
 
     previous_t = 0.0
     try:
         for index, step in enumerate(steps, start=1):
             if not dry_run:
+                assert dps is not None  # narrowed by the entry guard
                 dps.voltage_set("w", step.voltage_v)
                 dps.current_set("w", step.current_a)
 
@@ -185,15 +187,17 @@ def run_sequence(
             if time_mode == "step":
                 wait_s = max(0.0, step.time_s)
             else:
+                # Allow loop wrap-around: if time goes backwards, treat it as a
+                # new loop iteration starting from 0.
                 if step.time_s < previous_t:
-                    raise ValueError("Absolute time values must be non-decreasing")
+                    previous_t = 0.0
                 wait_s = step.time_s - previous_t
                 previous_t = step.time_s
 
             if wait_s > 0:
                 time.sleep(wait_s)
     finally:
-        if not dry_run:
+        if not dry_run and dps is not None:
             dps.onoff("w", 0)
         if printer is not None:
             printer.disconnect()
@@ -223,7 +227,7 @@ def parse_args() -> argparse.Namespace:
         help="Fallback feedrate when CSV row has no feedrate/speed",
     )
 
-    parser.add_argument("--modbus-port", required=True, help="DPS Modbus serial port")
+    parser.add_argument("--modbus-port", default="", help="DPS Modbus serial port (required unless --dry-run)")
     parser.add_argument("--modbus-address", type=int, default=1, help="DPS Modbus address")
     parser.add_argument("--modbus-baud", type=int, default=9600, help="DPS Modbus baud rate")
     parser.add_argument(
@@ -234,7 +238,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--printer-port", default="", help="3D printer serial port")
-    parser.add_argument("--printer-baud", type=int, default=115200, help="3D printer baud rate")
+    parser.add_argument("--printer-baud", type=int, default=250000, help="3D printer baud rate")
 
     parser.add_argument(
         "--dry-run",
@@ -253,6 +257,9 @@ def main() -> None:
     if args.dry_run:
         run_sequence(looped_steps, dps=None, printer=None, time_mode=args.time_mode, dry_run=True)
         return
+
+    if not args.modbus_port.strip():
+        raise SystemExit("error: --modbus-port is required when not using --dry-run")
 
     dps = connect_dps(
         modbus_port=args.modbus_port,

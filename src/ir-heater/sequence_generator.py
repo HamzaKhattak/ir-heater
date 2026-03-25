@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,7 +22,6 @@ class PositionPairSpec:
     current_a: float
     voltage_v: float
     feedrate: float
-    step_s: float
 
 
 @dataclass(frozen=True)
@@ -62,14 +62,11 @@ def _parse_float(row: dict[str, str], keys: tuple[str, ...], line_number: int) -
 def read_pair_specs_csv(
     pairs_csv: Path,
     default_feedrate: float,
-    default_step_s: float,
 ) -> list[PositionPairSpec]:
     if not pairs_csv.exists():
         raise ValueError(f"Pairs CSV file not found: {pairs_csv}")
     if default_feedrate <= 0:
         raise ValueError("default_feedrate must be > 0")
-    if default_step_s <= 0:
-        raise ValueError("default_step_s must be > 0")
 
     specs: list[PositionPairSpec] = []
     with pairs_csv.open("r", newline="", encoding="utf-8-sig") as handle:
@@ -99,8 +96,6 @@ def read_pair_specs_csv(
 
             feedrate_raw = _get_value(normalized, ("feedrate", "speed", "f"))
             feedrate = default_feedrate if feedrate_raw == "" else float(feedrate_raw)
-            step_raw = _get_value(normalized, ("step_s", "time_step", "dt"))
-            step_s = default_step_s if step_raw == "" else float(step_raw)
 
             if duration_s <= 0:
                 raise ValueError(f"duration_s must be > 0 at line {line_number}")
@@ -110,8 +105,6 @@ def read_pair_specs_csv(
                 raise ValueError(f"voltage_v must be >= 0 at line {line_number}")
             if feedrate <= 0:
                 raise ValueError(f"feedrate must be > 0 at line {line_number}")
-            if step_s <= 0:
-                raise ValueError(f"step_s must be > 0 at line {line_number}")
 
             specs.append(
                 PositionPairSpec(
@@ -121,7 +114,6 @@ def read_pair_specs_csv(
                     current_a=current_a,
                     voltage_v=voltage_v,
                     feedrate=feedrate,
-                    step_s=step_s,
                 )
             )
 
@@ -130,18 +122,40 @@ def read_pair_specs_csv(
     return specs
 
 
+def _travel_time_s(spec: PositionPairSpec) -> float:
+    """Time in seconds for one A→B (or B→A) move at the pair's feedrate.
+
+    Feedrate is in mm/min (standard G-code convention), so divide by 60
+    to convert to mm/s before dividing into distance.
+    """
+    dx = spec.b.x - spec.a.x
+    dy = spec.b.y - spec.a.y
+    dz = spec.b.z - spec.a.z
+    distance_mm = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if distance_mm == 0.0:
+        raise ValueError(
+            f"Position A and B are identical for pair starting at A={spec.a}. "
+            "Cannot compute travel time for a zero-distance move."
+        )
+    return distance_mm * 60.0 / spec.feedrate
+
+
 def rows_for_pair(spec: PositionPairSpec) -> list[SequenceRow]:
+    travel_time_s = _travel_time_s(spec)
     rows: list[SequenceRow] = []
     elapsed = 0.0
     use_a = True
 
     # Alternate A/B moves until this pair's requested duration is consumed.
+    # Always emit the full travel_time_s per step so the runner sleeps for
+    # exactly as long as the printer needs — never firing the next command
+    # mid-move. The last move may push slightly past duration_s, but every
+    # move is always complete.
     while elapsed < spec.duration_s:
-        dt = min(spec.step_s, spec.duration_s - elapsed)
         pos = spec.a if use_a else spec.b
         rows.append(
             SequenceRow(
-                time_s=dt,
+                time_s=travel_time_s,
                 current_a=spec.current_a,
                 voltage_v=spec.voltage_v,
                 x=pos.x,
@@ -150,7 +164,7 @@ def rows_for_pair(spec: PositionPairSpec) -> list[SequenceRow]:
                 feedrate=spec.feedrate,
             )
         )
-        elapsed += dt
+        elapsed += travel_time_s
         use_a = not use_a
 
     return rows
@@ -203,13 +217,7 @@ def parse_args() -> argparse.Namespace:
         "--default-feedrate",
         type=float,
         default=1200.0,
-        help="Default feedrate when pair row does not define feedrate",
-    )
-    parser.add_argument(
-        "--default-step-s",
-        type=float,
-        default=0.5,
-        help="Default time in seconds between A/B moves when pair row does not define step_s",
+        help="Default feedrate (mm/min) when pair row does not define feedrate",
     )
     return parser.parse_args()
 
@@ -219,7 +227,6 @@ def main() -> None:
     specs = read_pair_specs_csv(
         pairs_csv=args.pairs_csv,
         default_feedrate=args.default_feedrate,
-        default_step_s=args.default_step_s,
     )
     rows = generate_sequence_rows(specs)
     write_sequence_csv(rows, args.output)
