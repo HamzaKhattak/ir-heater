@@ -82,6 +82,7 @@ Run:
 ```bash
 uv run main.py generate \
 	--pairs-csv pair_specs.csv \
+	--default-transition-s 1.5 \
 	--output sequence.csv
 ```
 
@@ -96,6 +97,7 @@ Input pairs CSV required columns:
 Optional pair column:
 
 - `feedrate` (or `speed`, `f`) — defaults to `--default-feedrate` if omitted
+- `transition_s` (or `transition_to_next_s`, `move_to_next_s`) — time in seconds to move from this pair section to the next pair's `A` point
 
 Behavior:
 
@@ -106,6 +108,8 @@ Behavior:
   where feedrate is in mm/min (standard G-code).
 - Each CSV `time` value is set to exactly $t_{travel}$, so the runner sleeps for precisely as long as the printer needs to complete each move — no idle waiting, no queued-up commands mid-move.
 - The generator alternates A → B → A → B until the pair's `duration_s` is consumed, then moves to the next pair row.
+- Between pair sections, the generator inserts a transition move from the previous section's last reached point to the next section's `A` point.
+- That transition uses the specified `transition_s` (or `--default-transition-s`), and the transition feedrate is computed so the move takes exactly that time.
 - Each pair can have different `duration_s`, `current_a`, `voltage_v`, and `feedrate`.
 - A and B must not be the same position (zero distance produces an error).
 - Output CSV columns are: `time,current,voltage,x,y,z,feedrate`.
@@ -113,7 +117,7 @@ Behavior:
 Example input (`pair_specs.csv`):
 
 ```csv
-ax,ay,az,bx,by,bz,duration_s,current_a,voltage_v,feedrate
-10,10,1,20,10,1,15,1.20,12.0,1200
-20,20,1,30,20,1,8,0.90,10.5,1000
+ax,ay,az,bx,by,bz,duration_s,current_a,voltage_v,feedrate,transition_s
+10,10,1,20,10,1,15,1.20,12.0,1200,2.0
+20,20,1,30,20,1,8,0.90,10.5,1000,1.0
 ```

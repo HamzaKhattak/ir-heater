@@ -22,6 +22,7 @@ class PositionPairSpec:
     current_a: float
     voltage_v: float
     feedrate: float
+    transition_to_next_s: float
 
 
 @dataclass(frozen=True)
@@ -62,11 +63,14 @@ def _parse_float(row: dict[str, str], keys: tuple[str, ...], line_number: int) -
 def read_pair_specs_csv(
     pairs_csv: Path,
     default_feedrate: float,
+    default_transition_s: float,
 ) -> list[PositionPairSpec]:
     if not pairs_csv.exists():
         raise ValueError(f"Pairs CSV file not found: {pairs_csv}")
     if default_feedrate <= 0:
         raise ValueError("default_feedrate must be > 0")
+    if default_transition_s < 0:
+        raise ValueError("default_transition_s must be >= 0")
 
     specs: list[PositionPairSpec] = []
     with pairs_csv.open("r", newline="", encoding="utf-8-sig") as handle:
@@ -96,6 +100,13 @@ def read_pair_specs_csv(
 
             feedrate_raw = _get_value(normalized, ("feedrate", "speed", "f"))
             feedrate = default_feedrate if feedrate_raw == "" else float(feedrate_raw)
+            transition_raw = _get_value(
+                normalized,
+                ("transition_s", "transition_to_next_s", "move_to_next_s"),
+            )
+            transition_to_next_s = (
+                default_transition_s if transition_raw == "" else float(transition_raw)
+            )
 
             if duration_s <= 0:
                 raise ValueError(f"duration_s must be > 0 at line {line_number}")
@@ -105,6 +116,8 @@ def read_pair_specs_csv(
                 raise ValueError(f"voltage_v must be >= 0 at line {line_number}")
             if feedrate <= 0:
                 raise ValueError(f"feedrate must be > 0 at line {line_number}")
+            if transition_to_next_s < 0:
+                raise ValueError(f"transition_s must be >= 0 at line {line_number}")
 
             specs.append(
                 PositionPairSpec(
@@ -114,6 +127,7 @@ def read_pair_specs_csv(
                     current_a=current_a,
                     voltage_v=voltage_v,
                     feedrate=feedrate,
+                    transition_to_next_s=transition_to_next_s,
                 )
             )
 
@@ -138,6 +152,20 @@ def _travel_time_s(spec: PositionPairSpec) -> float:
             "Cannot compute travel time for a zero-distance move."
         )
     return distance_mm * 60.0 / spec.feedrate
+
+
+def _distance_mm(start: Position, end: Position) -> float:
+    dx = end.x - start.x
+    dy = end.y - start.y
+    dz = end.z - start.z
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+
+
+def _transition_feedrate(start: Position, end: Position, transition_s: float, fallback_feedrate: float) -> float:
+    distance_mm = _distance_mm(start, end)
+    if distance_mm == 0:
+        return fallback_feedrate
+    return distance_mm * 60.0 / transition_s
 
 
 def rows_for_pair(spec: PositionPairSpec) -> list[SequenceRow]:
@@ -172,8 +200,40 @@ def rows_for_pair(spec: PositionPairSpec) -> list[SequenceRow]:
 
 def generate_sequence_rows(specs: list[PositionPairSpec]) -> list[SequenceRow]:
     rows: list[SequenceRow] = []
-    for spec in specs:
-        rows.extend(rows_for_pair(spec))
+    for idx, spec in enumerate(specs):
+        pair_rows = rows_for_pair(spec)
+        rows.extend(pair_rows)
+
+        if idx == len(specs) - 1:
+            continue
+
+        next_spec = specs[idx + 1]
+        if spec.transition_to_next_s <= 0:
+            continue
+
+        # Move from the last point reached in this pair section to next pair's A
+        # in exactly transition_to_next_s seconds.
+        last = pair_rows[-1]
+        start_pos = Position(last.x, last.y, last.z)
+        end_pos = next_spec.a
+        transition_feedrate = _transition_feedrate(
+            start=start_pos,
+            end=end_pos,
+            transition_s=spec.transition_to_next_s,
+            fallback_feedrate=next_spec.feedrate,
+        )
+
+        rows.append(
+            SequenceRow(
+                time_s=spec.transition_to_next_s,
+                current_a=next_spec.current_a,
+                voltage_v=next_spec.voltage_v,
+                x=end_pos.x,
+                y=end_pos.y,
+                z=end_pos.z,
+                feedrate=transition_feedrate,
+            )
+        )
     return rows
 
 
@@ -219,6 +279,12 @@ def parse_args() -> argparse.Namespace:
         default=1200.0,
         help="Default feedrate (mm/min) when pair row does not define feedrate",
     )
+    parser.add_argument(
+        "--default-transition-s",
+        type=float,
+        default=5.0,
+        help="Default transition time in seconds between pair sections",
+    )
     return parser.parse_args()
 
 
@@ -227,6 +293,7 @@ def main() -> None:
     specs = read_pair_specs_csv(
         pairs_csv=args.pairs_csv,
         default_feedrate=args.default_feedrate,
+        default_transition_s=args.default_transition_s,
     )
     rows = generate_sequence_rows(specs)
     write_sequence_csv(rows, args.output)
