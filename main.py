@@ -10,6 +10,10 @@ def _load_module(module_name: str, module_path: Path):
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Unable to load module from {module_path}")
 
+    module_dir = str(module_path.parent)
+    if module_dir not in sys.path:
+        sys.path.insert(0, module_dir)
+
     module = importlib.util.module_from_spec(spec)
     # Ensure decorators and runtime introspection can resolve the module during import.
     sys.modules[module_name] = module
