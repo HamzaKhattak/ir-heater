@@ -35,6 +35,12 @@ def _run_generator(args: list[str]) -> None:
     module.main()
 
 
+def _run_gui() -> None:
+    module_path = Path(__file__).parent / "src" / "ir-heater" / "gui.py"
+    module = _load_module("gui", module_path)
+    module.main()
+
+
 def main() -> None:
     args = sys.argv[1:]
     if args and args[0] == "generate":
@@ -42,6 +48,9 @@ def main() -> None:
         return
     if args and args[0] == "run":
         _run_runner(args[1:])
+        return
+    if args and args[0] == "gui":
+        _run_gui()
         return
 
     # Backward-compatible default: route directly to runner flags.
