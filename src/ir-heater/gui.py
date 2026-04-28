@@ -31,11 +31,15 @@ _SR_DIR = Path(__file__).parent
 if str(_SR_DIR) not in sys.path:
     sys.path.insert(0, str(_SR_DIR))
 
+from sequence_generator import (  # noqa: E402 – path patched above
+    generate_sequence_rows,
+    read_pair_specs_csv,
+    write_sequence_csv,
+)
 from sequence_runner import (  # noqa: E402 – path patched above
     PrinterController,
     SequenceStep,
     connect_dps,
-    expand_loop_steps,
     read_sequence_csv,
     run_sequence,
 )
@@ -54,8 +58,8 @@ class App(tk.Tk):
         self.title("IR Heater Sequence Runner")
         self.resizable(True, True)
 
-        self._steps: list[SequenceStep] = []
         self._looped_steps: list[SequenceStep] = []
+        self._generated_csv_path: Path | None = None
         self._stop_event = threading.Event()
         self._progress_q: queue.Queue[int | str] = queue.Queue()
         self._worker: threading.Thread | None = None
@@ -73,13 +77,13 @@ class App(tk.Tk):
         ctrl.grid(row=0, column=0, sticky="ew")
         self.columnconfigure(0, weight=1)
 
-        # --- CSV row ---
-        ttk.Label(ctrl, text="CSV:").grid(row=0, column=0, sticky="w")
-        self._csv_var = tk.StringVar()
-        ttk.Entry(ctrl, textvariable=self._csv_var, width=55).grid(
+        # --- Pairs CSV row ---
+        ttk.Label(ctrl, text="Pairs CSV:").grid(row=0, column=0, sticky="w")
+        self._pairs_csv_var = tk.StringVar()
+        ttk.Entry(ctrl, textvariable=self._pairs_csv_var, width=55).grid(
             row=0, column=1, padx=4, sticky="ew"
         )
-        ttk.Button(ctrl, text="Browse…", command=self._browse_csv).grid(row=0, column=2)
+        ttk.Button(ctrl, text="Browse…", command=self._browse_pairs_csv).grid(row=0, column=2)
         ctrl.columnconfigure(1, weight=1)
 
         # --- Connection settings ---
@@ -106,15 +110,27 @@ class App(tk.Tk):
         self._printer_baud_var = tk.StringVar(value="250000")
         ttk.Entry(conn, textvariable=self._printer_baud_var, width=7).pack(side="left", padx=2)
 
+        # --- Generator options ---
+        gen = ttk.Frame(ctrl)
+        gen.grid(row=2, column=0, columnspan=3, sticky="ew", pady=4)
+
+        ttk.Label(gen, text="Default feedrate:").pack(side="left")
+        self._feedrate_var = tk.StringVar(value=str(_DEFAULT_FEEDRATE))
+        ttk.Entry(gen, textvariable=self._feedrate_var, width=7).pack(side="left", padx=2)
+
+        ttk.Label(gen, text="Default transition:").pack(side="left", padx=(8, 0))
+        self._transition_var = tk.StringVar(value="5.0")
+        ttk.Entry(gen, textvariable=self._transition_var, width=6).pack(side="left", padx=2)
+
+        ttk.Label(gen, text="Loops:").pack(side="left", padx=(8, 0))
+        self._loops_var = tk.StringVar(value="1")
+        ttk.Entry(gen, textvariable=self._loops_var, width=5).pack(side="left", padx=2)
+
         # --- Sequence options ---
         opts = ttk.Frame(ctrl)
-        opts.grid(row=2, column=0, columnspan=3, sticky="ew", pady=4)
+        opts.grid(row=3, column=0, columnspan=3, sticky="ew", pady=4)
 
-        ttk.Label(opts, text="Loops:").pack(side="left")
-        self._loops_var = tk.StringVar(value="1")
-        ttk.Entry(opts, textvariable=self._loops_var, width=5).pack(side="left", padx=2)
-
-        ttk.Label(opts, text="Time mode:").pack(side="left", padx=(8, 0))
+        ttk.Label(opts, text="Time mode:").pack(side="left")
         self._time_mode_var = tk.StringVar(value="step")
         ttk.Combobox(
             opts,
@@ -124,10 +140,6 @@ class App(tk.Tk):
             state="readonly",
         ).pack(side="left", padx=2)
 
-        ttk.Label(opts, text="Default feedrate:").pack(side="left", padx=(8, 0))
-        self._feedrate_var = tk.StringVar(value=str(_DEFAULT_FEEDRATE))
-        ttk.Entry(opts, textvariable=self._feedrate_var, width=7).pack(side="left", padx=2)
-
         self._dry_run_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(opts, text="Dry run", variable=self._dry_run_var).pack(
             side="left", padx=(10, 0)
@@ -135,7 +147,7 @@ class App(tk.Tk):
 
         # --- Run / Stop + status ---
         actions = ttk.Frame(ctrl)
-        actions.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(6, 2))
+        actions.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(6, 2))
 
         self._run_btn = ttk.Button(actions, text="Run", command=self._on_run, width=10)
         self._run_btn.pack(side="left")
@@ -151,7 +163,7 @@ class App(tk.Tk):
         # --- Progress bar ---
         self._progress_var = tk.DoubleVar(value=0.0)
         ttk.Progressbar(ctrl, variable=self._progress_var, maximum=100.0).grid(
-            row=4, column=0, columnspan=3, sticky="ew", pady=(0, 4)
+            row=5, column=0, columnspan=3, sticky="ew", pady=(0, 4)
         )
 
     def _build_plots(self) -> None:
@@ -187,33 +199,65 @@ class App(tk.Tk):
     # User interactions
     # ------------------------------------------------------------------
 
-    def _browse_csv(self) -> None:
+    def _browse_pairs_csv(self) -> None:
         path = filedialog.askopenfilename(
-            title="Select sequence CSV",
+            title="Select pairs CSV",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
         )
         if not path:
             return
-        self._csv_var.set(path)
-        self._load_csv(Path(path))
+        self._pairs_csv_var.set(path)
+        self._load_pairs_csv(Path(path))
 
-    def _load_csv(self, path: Path) -> None:
+    def _load_pairs_csv(self, path: Path) -> None:
         try:
             feedrate = float(self._feedrate_var.get() or _DEFAULT_FEEDRATE)
-            steps = read_sequence_csv(path, default_feedrate=feedrate)
-        except Exception as exc:
-            messagebox.showerror("CSV Error", str(exc))
+            transition = float(self._transition_var.get() or 5.0)
+            loops = max(1, int(self._loops_var.get() or 1))
+        except ValueError as exc:
+            messagebox.showerror("Input Error", f"Invalid parameter: {exc}")
             return
 
         try:
-            loops = max(1, int(self._loops_var.get() or 1))
-        except ValueError:
-            loops = 1
+            specs = read_pair_specs_csv(
+                pairs_csv=path,
+                default_feedrate=feedrate,
+                default_transition_s=transition,
+            )
+        except Exception as exc:
+            messagebox.showerror("Pairs CSV Error", str(exc))
+            return
 
-        self._steps = steps
-        self._looped_steps = expand_loop_steps(steps, loops)
+        # Generate the sequence
+        try:
+            rows = generate_sequence_rows(specs)
+        except Exception as exc:
+            messagebox.showerror("Generation Error", str(exc))
+            return
+
+        # Multiply rows by loop count
+        looped_rows = rows * loops
+
+        # Write to a generated file named <original>_loops_<count>.csv
+        output_path = path.with_stem(f"{path.stem}_loops_{loops}")
+        try:
+            write_sequence_csv(looped_rows, output_path)
+        except Exception as exc:
+            messagebox.showerror("Write Error", str(exc))
+            return
+
+        # Read back the generated sequence
+        try:
+            self._looped_steps = read_sequence_csv(output_path, default_feedrate=feedrate)
+        except Exception as exc:
+            messagebox.showerror("Sequence Error", str(exc))
+            return
+
+        self._generated_csv_path = output_path
         self._plot_planned(self._looped_steps)
-        self._status_var.set(f"Loaded {len(self._looped_steps)} steps")
+        self._status_var.set(
+            f"Generated {output_path.name}: {len(self._looped_steps)} steps"
+        )
 
     def _plot_planned(self, steps: list[SequenceStep]) -> None:
         xs = list(range(len(steps)))
@@ -252,15 +296,11 @@ class App(tk.Tk):
         self._canvas.draw_idle()
 
     def _on_run(self) -> None:
-        csv_path_str = self._csv_var.get().strip()
-        if not csv_path_str:
-            messagebox.showwarning("No CSV", "Please select a CSV file first.")
-            return
-
         if not self._looped_steps:
-            self._load_csv(Path(csv_path_str))
-            if not self._looped_steps:
-                return
+            messagebox.showwarning(
+                "No sequence", "Please load a pairs CSV first to generate a sequence."
+            )
+            return
 
         dry_run = self._dry_run_var.get()
         if not dry_run and not self._modbus_port_var.get().strip():
@@ -296,20 +336,26 @@ class App(tk.Tk):
                 printer = None
             else:
                 ini_path = Path(__file__).with_name("dps5005_limits.ini")
-                dps = connect_dps(
-                    modbus_port=self._modbus_port_var.get().strip(),
-                    ini_path=ini_path,
-                    address=int(self._modbus_addr_var.get() or 1),
-                    baudrate=int(self._modbus_baud_var.get() or 9600),
-                )
-                printer_port = self._printer_port_var.get().strip()
-                printer = (
-                    PrinterController(
-                        printer_port, int(self._printer_baud_var.get() or 250000)
+                try:
+                    dps = connect_dps(
+                        modbus_port=self._modbus_port_var.get().strip(),
+                        ini_path=ini_path,
+                        address=int(self._modbus_addr_var.get() or 1),
+                        baudrate=int(self._modbus_baud_var.get() or 9600),
                     )
-                    if printer_port
-                    else None
-                )
+                except Exception as exc:
+                    raise RuntimeError(f"Failed to connect DPS: {exc}") from exc
+
+                printer_port = self._printer_port_var.get().strip()
+                if printer_port:
+                    try:
+                        printer = PrinterController(
+                            printer_port, int(self._printer_baud_var.get() or 250000)
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(f"Failed to connect printer: {exc}") from exc
+                else:
+                    printer = None
 
             def _on_step(index: int, total: int) -> None:
                 # Called from the worker thread — only a fast queue put, no GUI calls
