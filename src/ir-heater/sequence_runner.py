@@ -173,6 +173,7 @@ def run_sequence(
     dry_run: bool,
     stop_event: threading.Event | None = None,
     on_step: Callable[[int, int], None] | None = None,
+    return_to_origin: bool = True,
 ) -> None:
     if time_mode not in {"step", "absolute"}:
         raise ValueError("time_mode must be one of: step, absolute")
@@ -243,14 +244,21 @@ def run_sequence(
         if not dry_run and dps is not None:
             dps.onoff("w", 0)
             print("Light turned off.", flush=True)
-        if printer is not None and home_step is not None:
-            print(
-                f"Moving to initial position: "
-                f"X={home_step.x:.3f} Y={home_step.y:.3f} Z={home_step.z:.3f}",
-                flush=True,
-            )
-            printer.send_move(home_step.x, home_step.y, home_step.z, home_step.feedrate)
         if printer is not None:
+            if return_to_origin:
+                print(
+                    "Moving to origin: X=0.000 Y=0.000 Z=0.000",
+                    flush=True,
+                )
+                origin_feedrate = home_step.feedrate if home_step is not None else 1200.0
+                printer.send_move(0.0, 0.0, 0.0, origin_feedrate)
+            elif home_step is not None:
+                print(
+                    f"Moving to initial position: "
+                    f"X={home_step.x:.3f} Y={home_step.y:.3f} Z={home_step.z:.3f}",
+                    flush=True,
+                )
+                printer.send_move(home_step.x, home_step.y, home_step.z, home_step.feedrate)
             printer.disconnect()
 
 
@@ -295,6 +303,12 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Parse and print schedule without sending commands to hardware",
+    )
+    parser.add_argument(
+        "--return-to-first-position",
+        action="store_true",
+        default=False,
+        help="After the sequence ends return to the first CSV position instead of 0,0,0 (default: return to origin)",
     )
     return parser.parse_args()
 
@@ -348,6 +362,7 @@ def main() -> None:
         time_mode=args.time_mode,
         dry_run=False,
         stop_event=stop_event,
+        return_to_origin=not args.return_to_first_position,
     )
 
 

@@ -145,6 +145,11 @@ class App(tk.Tk):
             side="left", padx=(10, 0)
         )
 
+        self._return_to_origin_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            opts, text="Return to 0,0,0 after run", variable=self._return_to_origin_var
+        ).pack(side="left", padx=(10, 0))
+
         # --- Run / Stop + status ---
         actions = ttk.Frame(ctrl)
         actions.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(6, 2))
@@ -369,6 +374,7 @@ class App(tk.Tk):
                 dry_run=dry_run,
                 stop_event=self._stop_event,
                 on_step=_on_step,
+                return_to_origin=self._return_to_origin_var.get(),
             )
             self._progress_q.put("done")
 
